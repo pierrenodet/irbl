@@ -1,0 +1,11 @@
+matplotlib==3.2.0
+numpy==1.18.1
+Orange3==3.26.0
+scikit-image==0.16.2
+scikit-learn==0.23.1
+scipy==1.2.1
+sklearn==0.0
+skorch==0.8.0
+torch==1.5.0
+pandas==0.24.1
+matplotlib==3.2.0
