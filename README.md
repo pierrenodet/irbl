@@ -12,7 +12,7 @@ Importance Reweighting for Biquality Learning (IRBL) is a meta algorithm that le
 
 In order to run the experiments and generate results files and figures, run the following lines :
 
-```bash
+```
 git clone https://github.com/pierrenodet/irbl.git
 cd irbl
 unzip data.zip
