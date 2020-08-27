@@ -1602,10 +1602,10 @@ for cr_idx, cr_kind in enumerate(cr_kinds):
 
     results = pd.read_csv("{}/results-{}.csv".format(base_dir,"acc"))
 
-    method_names = ["trusted","rll","irbl","glc","mixed","total"]
+    method_names = ["trusted","rll","irbl","glc","mixed"]
     final = results.groupby(["name"]).sum().reset_index()
     avranks = friedman_test(final["trusted"].values,final["symetric"].values,final["irblc"].values,final["glc"].values,
-    final["mixed"].values,final["total"].values,reverse=False)[2]
+    final["mixed"].values,reverse=False)[2]
 
     cd = Orange.evaluation.compute_CD(avranks, 20)
     Orange.evaluation.graph_ranks(avranks, method_names, cd=cd, width=6, textspace=1)
