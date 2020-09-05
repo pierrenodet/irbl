@@ -826,6 +826,28 @@ def irbl(trusted, untrusted, test, ft, fu, optimizer, batch_size, epochs, lr, we
                                columns=["mean_train_losses", "mean_valid_losses", "accs"]), pd.Series(total_beta.detach().numpy())
 
 
+def normal_sklearn(train, test, estimator, calibration_method="isotonic", sample_weight=None):
+
+    X_train = train[:][0]
+    y_train = train[:][1]
+
+    X_test = test[:][0]
+    y_test = test[:][1]
+
+    if calibration_method == "nothing":
+        model = clone(estimator).fit(X_train, y_train, sample_weight=sample_weight)
+    elif calibration_method == "isotonic":
+        model = CalibratedClassifierCV(estimator, method=calibration_method).fit(
+            X_train, y_train, sample_weight=sample_weight)
+
+    acc = accuracy_score(y_test, model.predict(X_test))
+    
+    print('valid acc : {:.2f}'
+          .format(acc))
+
+    return model, pd.DataFrame([[acc]],
+                               columns=["acc"])
+
 def glc(trusted, untrusted, test, fu, optimizer, batch_size, epochs, lr, weight_decay, hidden_size):
 
     input_size = len(trusted[0][0])
