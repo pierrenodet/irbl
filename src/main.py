@@ -16,7 +16,7 @@ from sklearn.base import clone
 from scipy import stats
 import math
 import Orange
-from skorch import NeuralNetClassifier
+from skorch import NeuralNetClassifier,NeuralNetBinaryClassifier
 import itertools
 import random
 
@@ -30,6 +30,16 @@ class LogisticRegressionSoftmax(torch.nn.Module):
 
     def forward(self, x):
         return torch.nn.functional.softmax(self.fc(x), dim=1)
+
+
+class BinaryLogisticRegression(torch.nn.Module):
+    def __init__(self, input_size):
+        super(BinaryLogisticRegression, self).__init__()
+        self.input_size = input_size
+        self.fc = torch.nn.Linear(self.input_size, 1)
+
+    def forward(self, x):
+        return self.fc(x)
 
 
 class LogisticRegression(torch.nn.Module):
@@ -699,11 +709,13 @@ def normal(train, test, optimizer, batch_size, epochs, lr, weight_decay, hidden_
             for i, (data, labels) in enumerate(valid_loader):
 
                 outputs = model(data)
+
                 loss = cross_entropy_loss(outputs, labels).mean()
 
                 valid_losses.append(loss.item())
 
                 valid_preds.append(torch.nn.functional.softmax(outputs, dim=1).numpy()[:, 1])
+
                 valid_labels.append(labels.numpy())
 
             mean_train_losses.append(np.mean(train_losses))
@@ -735,7 +747,6 @@ def irbl(trusted, untrusted, test, ft, fu, optimizer, batch_size, epochs, lr, we
         optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction="none")
-    nll_loss = torch.nn.NLLLoss(reduction="none")
 
     valid_loader = torch.utils.data.DataLoader(dataset=test,
                                                batch_size=batch_size,
@@ -770,6 +781,150 @@ def irbl(trusted, untrusted, test, ft, fu, optimizer, batch_size, epochs, lr, we
                          fu_proba)
         beta[torch.isnan(beta)] = 0.0
         beta[torch.isinf(beta)] = 0.0
+
+    total_beta = torch.cat([torch.ones(len(trusted)), beta]).detach()
+
+    total_loader = torch.utils.data.DataLoader(dataset=WeightedDataset(MergedDataset(trusted, untrusted), total_beta),
+                                               batch_size=batch_size,
+                                               shuffle=True,
+                                               num_workers=1,
+                                               drop_last=False)
+
+    for epoch in range(epochs):
+        model.train()
+
+        train_losses = []
+        valid_losses = []
+
+        valid_preds = []
+        valid_labels = []
+
+        for i, ((data, weights), (labels, is_corrupteds)) in enumerate(total_loader):
+
+            optimizer.zero_grad()
+
+            outputs = model(data)
+
+            loss = (cross_entropy_loss(outputs, labels) * weights).mean()
+
+            loss.backward()
+            optimizer.step()
+
+            train_losses.append(loss.item())
+
+        model.eval()
+        with torch.no_grad():
+            for i, (data, labels) in enumerate(valid_loader):
+
+                outputs = model(data)
+                loss = cross_entropy_loss(outputs, labels).mean()
+
+                valid_losses.append(loss.item())
+
+                valid_preds.append(torch.nn.functional.softmax(outputs, dim=1).float().numpy()[:, 1])
+                valid_labels.append(labels.numpy())
+
+            mean_train_losses.append(np.mean(train_losses))
+            mean_valid_losses.append(np.mean(valid_losses))
+
+        acc = accuracy_score(np.concatenate(valid_labels), np.concatenate(valid_preds) > 0.5)
+        accs.append(acc)
+
+        print('epoch : {}, train loss : {:.4f}, valid loss : {:.4f}, valid acc : {:.2f}'
+              .format(epoch + 1, np.mean(train_losses), np.mean(valid_losses), acc))
+
+    return model, pd.DataFrame(list(zip(mean_train_losses, mean_valid_losses, accs)),
+                               columns=["mean_train_losses", "mean_valid_losses", "accs"]), pd.Series(total_beta.detach().numpy())
+
+
+def normal_sklearn(train, test, estimator, calibration_method="isotonic", sample_weight=None):
+
+    X_train = train[:][0]
+    y_train = train[:][1]
+
+    X_test = test[:][0]
+    y_test = test[:][1]
+
+    if calibration_method == "nothing":
+        model = clone(estimator).fit(X_train, y_train)
+    elif calibration_method == "isotonic":
+        model = CalibratedClassifierCV(estimator, method=calibration_method).fit(
+            X_train, y_train, sample_weight=sample_weight)
+
+    acc = accuracy_score(y_test, model.predict(X_test))
+    
+    print('valid acc : {:.2f}'
+          .format(acc))
+
+    return model, pd.DataFrame([[acc]],
+                               columns=["acc"])
+
+
+def kdr(trusted, untrusted, test, optimizer, batch_size, epochs, lr, weight_decay, hidden_size):
+
+    input_size = len(trusted[0][0])
+    num_classes = 2
+
+    if hidden_size == 0:
+        model = LogisticRegression(input_size, num_classes)
+    else:
+        model = MLP(input_size, hidden_size, num_classes)
+
+    if optimizer == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    elif optimizer == "sgd":
+        optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction="none")
+
+    valid_loader = torch.utils.data.DataLoader(dataset=test,
+                                               batch_size=batch_size,
+                                               shuffle=True,
+                                               num_workers=1,
+                                               drop_last=False)
+
+    mean_train_losses = []
+    mean_valid_losses = []
+    accs = []
+
+    #predict the beta as you go in the last training loop if your data can't fit in memory
+    X_trusted = torch.from_numpy(trusted[:][0])
+    y_trusted = torch.from_numpy(trusted[:][1])
+    X_untrusted = torch.from_numpy(untrusted[:][0])
+    y_untrusted = torch.from_numpy(untrusted[:][1])
+
+    n_samples_trusted, _ = X_trusted.shape
+    n_samples_untrusted, _ = X_untrusted.shape
+
+    beta = torch.zeros(n_samples_untrusted)
+
+    prior = torch.true_divide(torch.true_divide(torch.bincount(y_trusted),n_samples_trusted),torch.true_divide(torch.bincount(y_untrusted),n_samples_untrusted))
+
+    for i in range(num_classes):
+
+        X_trusted_i = X_trusted[y_trusted == i]
+        X_untrusted_i = X_untrusted[y_untrusted == i]
+
+        n_trusted_i, _ = X_trusted_i.shape
+        n_untrusted_i, _ = X_untrusted_i.shape
+
+        s_trusted_i = torch.ones(n_trusted_i).float()
+        s_untrusted_i = torch.zeros(n_untrusted_i).float()
+
+        ratio = n_untrusted_i/n_trusted_i
+        lr,_ = normal_sklearn(
+        XYDataset(np.vstack((X_trusted_i,X_untrusted_i)),np.hstack((s_trusted_i,s_untrusted_i))), test, NeuralNetBinaryClassifier(
+            module=BinaryLogisticRegression,
+            module__input_size=input_size,
+            max_epochs=epochs,
+            train_split=None,
+            lr=learning_rate,
+            batch_size=batch_size,
+            optimizer__weight_decay=weight_decay,
+            iterator_train__shuffle=True),calibration_method="nothing")
+        ratio = ratio * torch.exp(lr.forward(X_untrusted_i))
+
+        beta[y_untrusted == i] = ratio * prior[i]
 
     total_beta = torch.cat([torch.ones(len(trusted)), beta]).detach()
 
@@ -1012,6 +1167,12 @@ def loop(dir, trusted, untrusted, test, optimizer, beta_batch_size, batch_size, 
                    learning_rate, weight_decay, hidden_size, loss="unhinged")
     symetric_data.to_csv("{}/symetric-perfs.csv".format(dir), index=False)
 
+    print("kdr")
+    _, kdrnc_data, kdrnc_beta = kdr(
+        trusted, untrusted, test, optimizer, batch_size, epochs, learning_rate, weight_decay, hidden_size)
+    kdrnc_data.to_csv("{}/kdr-perfs.csv".format(dir), index=False)
+    kdrnc_beta.to_csv("{}/kdr-beta.csv".format(dir), index=False, header=False)
+
     return
 
 
@@ -1110,6 +1271,7 @@ def hist_plot(figdir, resdir, name, p, q):
     flipped = pd.read_csv("{}/flipped.csv".format(results_directory)).to_numpy().flatten()
     bt = pd.read_csv("{}/full-torched-beta.csv".format(results_directory)).to_numpy().flatten()
     btc = pd.read_csv("{}/full-torched-calibrated-beta.csv".format(results_directory)).to_numpy().flatten()
+    kdr = pd.read_csv("{}/kdr-beta.csv".format(results_directory)).to_numpy().flatten()
 
     fig, ax = plt.subplots(figsize=(8,4))
     ax.hist([bt[flipped == 0], bt[flipped == 1]], label=["cleaned", "corrupted"], bins=20, color = ["lightgray","dimgray",])
@@ -1123,6 +1285,13 @@ def hist_plot(figdir, resdir, name, p, q):
     ax1.legend(loc = 'upper right')
     fig1.savefig("{}/full-torched-calibrated-hist.pdf".format(figures_directory), bbox = 'tight', bbox_inches="tight", format="pdf")
     plt.close(fig1)
+
+    fig2, ax2 = plt.subplots(figsize=(8,4))
+    ax2.hist([kdr[flipped == 0], kdr[flipped == 1]], #kdr[flipped == 2]],
+             label=["cleaned", "corrupted"], bins=20, color = ["lightgray","dimgray",])
+    ax2.legend(loc = 'upper right')
+    fig2.savefig("{}/kdr-hist.pdf".format(figures_directory), bbox = 'tight', bbox_inches="tight", format="pdf")
+    plt.close(fig2)
 
     return
 
@@ -1139,6 +1308,9 @@ def box_plot2(figdir, resdir, name, p, qs):
     btc_list = []
     btc_f_list = []
     btc_t_list = []
+    kdr_list = []
+    kdr_f_list = []
+    kdr_t_list = []
 
     for q_idx, q in enumerate(qs):
 
@@ -1147,6 +1319,7 @@ def box_plot2(figdir, resdir, name, p, qs):
         flipped = pd.read_csv("{}/flipped.csv".format(results_directory)).to_numpy().flatten()
         bt = pd.read_csv("{}/full-torched-beta.csv".format(results_directory)).to_numpy().flatten()
         btc = pd.read_csv("{}/full-torched-calibrated-beta.csv".format(results_directory)).to_numpy().flatten()
+        kdr = pd.read_csv("{}/kdr-beta.csv".format(results_directory)).to_numpy().flatten()
 
         bt_list.append(bt[flipped == 0])
         bt_f_list.append(bt[flipped == 1])
@@ -1154,6 +1327,9 @@ def box_plot2(figdir, resdir, name, p, qs):
         btc_list.append(btc[flipped == 0])
         btc_f_list.append(btc[flipped == 1])
         btc_t_list.append(btc[flipped == 2])
+        kdr_list.append(kdr[flipped == 0])
+        kdr_f_list.append(kdr[flipped == 1])
+        kdr_t_list.append(kdr[flipped == 2])
 
     c = 'lightgray'
     c0_dict = {
@@ -1189,7 +1365,16 @@ def box_plot2(figdir, resdir, name, p, qs):
     fig2.savefig("{}/full-torched-calibrated-box-plot-2.pdf".format(figures_directory), bbox = 'tight', bbox_inches="tight", format="pdf")
     plt.close(fig2)
 
+    fig3, ax3 = plt.subplots(figsize=(8,4))
+    ax3.set_xlabel("q = 1-r")
+    bp1 = ax3.boxplot(kdr_list[::-1], showfliers=False, labels=sorted(qs), **c0_dict)
+    bp2 = ax3.boxplot(kdr_f_list[::-1], showfliers=False, labels=sorted(qs), **c1_dict)
+    ax3.legend([bp1["boxes"][0], bp2["boxes"][0]], ['cleaned', 'corrupted'], loc='upper right')
+    fig3.savefig("{}/kdr-box-plot-2.pdf".format(figures_directory), bbox = 'tight', bbox_inches="tight", format="pdf")
+    plt.close(fig3)
+
     return
+
 
 
 def mean_area_under_error_curve(resdir, criteria):
@@ -1325,6 +1510,8 @@ def generate_results(resdir, names, ps, qs, criteria):
 
     total_error_list = []
 
+    kdr_error_list = []
+
     name_list = []
     p_list = []
     q_list = []
@@ -1351,6 +1538,8 @@ def generate_results(resdir, names, ps, qs, criteria):
 
                 total = pd.read_csv("{}/{}/total-perfs.csv".format(resdir, name))
 
+                kdr = pd.read_csv("{}/kdr-perfs.csv".format(complete_resdir))
+
                 if criteria == "mean_valid_losse":
 
                     ftt_error = np.min(ftt[criteria + "s"])
@@ -1361,7 +1550,8 @@ def generate_results(resdir, names, ps, qs, criteria):
                     glc_error = np.min(glc[criteria + "s"])
                     symetric_error = np.min(symetric[criteria + "s"])
                     total_error = np.min(total[criteria + "s"])
-                
+                    kdr_error = np.min(kdr[criteria + "s"])
+
                 else:
 
                     ftt_error = np.min(1 - ftt[criteria + "s"])
@@ -1372,6 +1562,7 @@ def generate_results(resdir, names, ps, qs, criteria):
                     glc_error = np.min(1 - glc[criteria + "s"])
                     symetric_error = np.min(1 - symetric[criteria + "s"])
                     total_error = np.min(1 - total[criteria + "s"])
+                    kdr_error = np.min(1 - kdr[criteria + "s"])
 
                 ftt_error_list.append(ftt_error)
                 fut_error_list.append(fut_error)
@@ -1387,12 +1578,14 @@ def generate_results(resdir, names, ps, qs, criteria):
 
                 total_error_list.append(total_error)
 
+                kdr_error_list.append(kdr_error)
+
                 name_list.append(name)
                 p_list.append(p)
                 q_list.append(q)
 
-    res = pd.DataFrame(list(zip(name_list, p_list, q_list, ftt_error_list, fut_error_list, bt_error_list, btc_error_list, mixed_error_list, glc_error_list, symetric_error_list, total_error_list)),
-                       columns=["name", "p", "q", "trusted", "untrusted", "irbl", "irblc", "mixed", "glc", "symetric", "total"])
+    res = pd.DataFrame(list(zip(name_list, p_list, q_list, kdr_error_list)),
+                       columns=["name", "p", "q", "kdr"])
 
     res.to_csv("{}/results-{}.csv".format(resdir,criteria), index=False)
 
@@ -1424,8 +1617,11 @@ def generate_wilcoxon(resdir,criteria):
     agg[["mixed_total_score", "mixed_total_hypothesis"]] = pd.DataFrame(
         agg.apply(lambda row: wilcoxon_test(row["mixed"], row["total"]), axis=1).values.tolist())
 
+    agg[["irblc_kdr_score", "irblc_kdr_hypothesis"]] = pd.DataFrame(
+        agg.apply(lambda row: wilcoxon_test(row["irblc"], row["kdr"]), axis=1).values.tolist())
+
     agg = agg.reindex(agg.irblc_glc_score.abs().sort_values(ascending=False).index).drop(
-        ["name", "trusted", "untrusted", "irbl", "irblc", "mixed", "glc", "symetric", "total"], axis=1)
+        ["name", "trusted", "untrusted", "irbl", "irblc", "mixed", "glc", "symetric", "total", "kdr"], axis=1)
 
     agg.to_csv("{}/wilcoxon-{}.csv".format(resdir,criteria), index=False)
 
@@ -1527,8 +1723,12 @@ names = [
     "zebra",
 ]
 
-cr_kinds = [noisy_completly_at_random, noisy_not_at_random]
-cr_names = ["ncar","nnar"]
+cr_kinds = [#noisy_completly_at_random, 
+noisy_not_at_random
+]
+cr_names = ["ncar",
+#"nnar"
+]
 
 
 ps = [0.02,0.05,0.1,0.25]
@@ -1567,10 +1767,10 @@ for cr_idx, cr_kind in enumerate(cr_kinds):
                 if not os.path.exists(dir):
                     os.makedirs(dir)
 
-                corrupted = corrupt_dataset(untrusted, cr_kind, 1 - q)
+                #corrupted = corrupt_dataset(untrusted, cr_kind, 1 - q)
 
-                # Use with NNAR
-                # corrupted = corrupt_dataset(untrusted, lambda y,ratio: cr_kind(torch.nn.functional.softmax(total_model(torch.from_numpy(untrusted[:][0])),dim=1)[:,1].detach().numpy(),y,ratio), 1 - q)
+                #Use with NNAR
+                corrupted = corrupt_dataset(untrusted, lambda y,ratio: cr_kind(torch.nn.functional.softmax(total_model(torch.from_numpy(untrusted[:][0])),dim=1)[:,1].detach().numpy(),y,ratio), 1 - q)
 
                 print(np.sum(corrupted[:][1] != untrusted[:][1]) / len(corrupted[:][1] != untrusted[:][1]))
 
@@ -1599,6 +1799,7 @@ for cr_idx, cr_kind in enumerate(cr_kinds):
     wilcoxon_plot("{}-figures".format(base_dir),base_dir,"acc","irblc","untrusted")
     wilcoxon_plot("{}-figures".format(base_dir),base_dir,"acc","irblc","total")
     wilcoxon_plot("{}-figures".format(base_dir),base_dir,"acc","irblc","symetric")
+    wilcoxon_plot("{}-figures".format(base_dir),base_dir,"acc","irblc","kdr")
 
     results = pd.read_csv("{}/results-{}.csv".format(base_dir,"acc"))
 
@@ -1622,5 +1823,6 @@ for cr_idx, cr_kind in enumerate(cr_kinds):
     results["glc"] = 100*(1 - results["glc"])
     results["mixed"] = 100*(1 - results["mixed"])
     results["total"] = 100*(1 - results["total"])
+    results["kdr"] = 100*(1 - results["kdr"])
     results = results.drop(["untrusted","irbl"],axis=1)
     results.groupby(["p","name"]).agg(["mean","std"]).drop("q",axis=1,level=0).reset_index().groupby("p").mean().to_csv("{}/aggregated-results-{}.csv".format(base_dir,"acc"), index=False)

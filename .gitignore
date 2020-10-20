@@ -168,3 +168,11 @@ dmypy.json
 
 # pytype static type analyzer
 .pytype/
+
+#PROJECT 
+data/
+ncar/
+ncar-figures/
+nnar/
+nnar-figures/
+results/

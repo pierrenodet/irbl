@@ -2,7 +2,7 @@
 
 This repository provides a reference implementation of the algorithm described in the paper :
 
-[Importance Reweighting for Biquality Learning]()
+[Importance Reweighting for Biquality Learning](https://arxiv.org/abs/2010.09621)
 
 ## Overview
 
@@ -26,5 +26,12 @@ Otherwise detailed results are provided for both supervisions deficiencies ([NCA
 If you use IRBL in your research, please consider citing us :
 
 ```
-
+@misc{nodet2020importance,
+      title={Importance Reweighting for Biquality Learning}, 
+      author={Pierre Nodet and Vincent Lemaire and Alexis Bondu and Antoine Cornuéjols},
+      year={2020},
+      eprint={2010.09621},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
 ```
