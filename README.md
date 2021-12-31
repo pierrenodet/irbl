@@ -26,12 +26,12 @@ Otherwise detailed results are provided for both supervisions deficiencies ([NCA
 If you use IRBL in your research, please consider citing us :
 
 ```
-@misc{nodet2020importance,
-      title={Importance Reweighting for Biquality Learning}, 
-      author={Pierre Nodet and Vincent Lemaire and Alexis Bondu and Antoine Cornuéjols},
-      year={2020},
-      eprint={2010.09621},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG}
+@inproceedings{nodet2021importance,
+  title={Importance reweighting for biquality learning},
+  author={Nodet, Pierre and Lemaire, Vincent and Bondu, Alexis and Cornu{\'e}jols, Antoine and Ouorou, Adam},
+  booktitle={2021 International Joint Conference on Neural Networks (IJCNN)},
+  pages={1--8},
+  year={2021},
+  organization={IEEE}
 }
 ```
